@@ -282,9 +282,10 @@ class MenuScene(Scene):
         self.tracks = {name: Track.load(name) for name in self.track_names}
         self.selected = 0
         self.previews: dict[str, pygame.Surface] = {}
+        self.drivers_dir = race.drivers_dir()
         self.champion_generation = None
-        if race.CHAMPION_PATH.exists():
-            self.champion_generation = brain.load(race.CHAMPION_PATH)[1]["generation"]
+        if self.drivers_dir is not None:
+            self.champion_generation = brain.load(self.drivers_dir / "champion.npz")[1]["generation"]
 
     @property
     def track(self) -> Track:
@@ -325,7 +326,7 @@ class MenuScene(Scene):
 
     def activate(self, item: str):
         s = self.settings
-        if item == "Watch a race" and race.CHAMPION_PATH.exists():
+        if item == "Watch a race" and self.drivers_dir is not None:
             self.next_scene = RaceScene(self.track, s.laps, s)
         elif item == "Train drivers":
             tracks = list(self.tracks.values()) if s.train_all else [self.track]
@@ -354,7 +355,8 @@ class MenuScene(Scene):
         if self.champion_generation is None:
             status = "No trained drivers yet. Train first."
         else:
-            status = f"Champion trained for {self.champion_generation} generations"
+            source = "pretrained" if self.drivers_dir == config.PRETRAINED_DIR else "your"
+            status = f"Racing {source} drivers - champion trained for {self.champion_generation} generations"
         screen.blit(render.font(24).render(status, True, render.MUTED), (120, y + 20))
         self._draw_preview(screen)
         render.draw_hint(screen, "Up/Down select   Left/Right change   Enter start   Esc quit")
