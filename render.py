@@ -89,6 +89,14 @@ def _draw_start_line(surface: pygame.Surface, track: Track, origin: np.ndarray):
             pygame.draw.polygon(surface, color, pts)
 
 
+def track_thumbnail(track: Track, box) -> pygame.Surface:
+    surface, origin = build_track_surface(track)
+    low, high = track.bounds(30)
+    crop = surface.subsurface(pygame.Rect(*(low - origin), *(high - low)))
+    scale = min(box[0] / crop.get_width(), box[1] / crop.get_height())
+    return pygame.transform.smoothscale_by(crop, scale)
+
+
 def make_car_sprite(color) -> pygame.Surface:
     sprite = pygame.Surface((config.CAR_LENGTH, config.CAR_WIDTH), pygame.SRCALPHA)
     body = sprite.get_rect()
@@ -152,17 +160,39 @@ def draw_cars(screen, camera: Camera, fleet: Fleet, sprites: list[pygame.Surface
         screen.blit(sprite, sprite.get_rect(center=camera.to_screen(fleet.position[i])))
 
 
-def draw_panel(screen, lines: list[str], topleft=(16, 16), size: int = 24, width: int | None = None):
-    rendered = [font(size).render(line, True, TEXT) for line in lines]
-    w = width or max(r.get_width() for r in rendered) + 24
+def mono_font(size: int) -> pygame.font.Font:
+    key = -size
+    if key not in _fonts:
+        _fonts[key] = pygame.font.SysFont("menlo,consolas,dejavusansmono,monospace", int(size * 0.7))
+    return _fonts[key]
+
+
+def draw_panel(screen, lines: list[str], topleft=(16, 16), size: int = 24, width: int | None = None,
+               swatches=None, mono: bool = False):
+    """Text lines on a translucent panel. `swatches` adds a color chip before each line."""
+    face = mono_font(size) if mono else font(size)
+    rendered = [face.render(line, True, TEXT) for line in lines]
+    indent = 12 + (16 if swatches else 0)
+    w = width or max(r.get_width() for r in rendered) + indent + 12
     h = sum(r.get_height() + 4 for r in rendered) + 16
     panel = pygame.Surface((w, h), pygame.SRCALPHA)
     panel.fill(PANEL)
     screen.blit(panel, topleft)
-    y = topleft[1] + 10
-    for r in rendered:
-        screen.blit(r, (topleft[0] + 12, y))
+    x, y = topleft
+    y += 10
+    for k, r in enumerate(rendered):
+        if swatches:
+            pygame.draw.rect(screen, swatches[k], (x + 12, y + r.get_height() / 2 - 5, 10, 10), border_radius=2)
+        screen.blit(r, (x + indent, y))
         y += r.get_height() + 4
+
+
+def draw_banner(screen, text: str, y: float, size: int = 48, color=TEXT):
+    label = font(size).render(text, True, color)
+    shadow = font(size).render(text, True, (0, 0, 0))
+    rect = label.get_rect(midtop=(config.SCREEN_W / 2, y))
+    screen.blit(shadow, rect.move(2, 2))
+    screen.blit(label, rect)
 
 
 def format_time(seconds: float | None) -> str:
@@ -199,3 +229,28 @@ def draw_fitness_graph(screen, history, size=(260, 110)):
     pygame.draw.lines(screen, MUTED, False, list(zip(xs, to_y(mean))), 2)
     pygame.draw.lines(screen, (250, 220, 80), False, list(zip(xs, to_y(best))), 2)
     screen.blit(font(18).render("fitness  (best / mean)", True, MUTED), (x0 + 10, y0 + h - 18))
+
+
+class Minimap:
+    """Small overview in the top-right corner for tracks that don't fit on screen."""
+
+    def __init__(self, track: Track, max_size=(240, 160)):
+        low, high = track.bounds(20)
+        extent = high - low
+        self.scale = min(max_size[0] / extent[0], max_size[1] / extent[1])
+        self.low = low
+        size = np.ceil(extent * self.scale).astype(int) + 20
+        self.surface = pygame.Surface(size, pygame.SRCALPHA)
+        self.surface.fill(PANEL)
+        pygame.draw.lines(self.surface, (120, 124, 130), True, [tuple(p) for p in self._to_map(track.center)], 5)
+        self.topleft = (config.SCREEN_W - size[0] - 16, 16)
+
+    def _to_map(self, world):
+        return (np.asarray(world) - self.low) * self.scale + 10
+
+    def draw(self, screen, positions, colors, highlight: int | None = None):
+        screen.blit(self.surface, self.topleft)
+        offset = np.array(self.topleft)
+        for i, point in enumerate(self._to_map(positions) + offset):
+            radius = 5 if i == highlight else 3
+            pygame.draw.circle(screen, colors[i % len(colors)], point, radius)
