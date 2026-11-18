@@ -5,7 +5,7 @@ import pygame
 
 import config
 from evolution import Trainer
-from scenes import DriveScene, TrainScene
+from scenes import DriveScene, MenuScene, MenuSettings, RaceScene, TrainScene
 from track import Track
 
 
@@ -24,7 +24,7 @@ def run(scene):
 
     while scene is not None:
         for event in pygame.event.get():
-            if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
+            if event.type == pygame.QUIT:
                 scene = None
                 break
             if event.type == pygame.KEYDOWN and event.key == pygame.K_F12:
@@ -44,7 +44,9 @@ def run(scene):
 
 def main():
     parser = argparse.ArgumentParser(description="Train AI drivers and watch them race.")
-    parser.add_argument("--track", default="circle", help="track name, or 'all' to train on every track")
+    parser.add_argument("--race", action="store_true", help="go straight to a race")
+    parser.add_argument("--laps", type=int, default=3)
+    parser.add_argument("--track", default="circle", help="track name, comma-separated list, or 'all'")
     parser.add_argument("--drive", action="store_true", help="drive a car yourself")
     parser.add_argument("--train", action="store_true", help="train AI drivers")
     parser.add_argument("--fresh", action="store_true", help="start training from scratch")
@@ -52,15 +54,20 @@ def main():
     parser.add_argument("--gens", type=int, default=50, help="generations to run headless")
     args = parser.parse_args()
 
-    names = Track.available() if args.track == "all" else [args.track]
+    names = Track.available() if args.track == "all" else args.track.split(",")
     tracks = [Track.load(name) for name in names]
 
+    settings = MenuSettings(track_index=Track.available().index(names[0]), laps=args.laps)
     if args.train and args.headless:
         Trainer(tracks, fresh=args.fresh).run_headless(args.gens)
     elif args.train:
-        run(TrainScene(tracks, fresh=args.fresh))
+        run(TrainScene(tracks, fresh=args.fresh, settings=settings))
+    elif args.race:
+        run(RaceScene(tracks[0], args.laps, settings))
+    elif args.drive:
+        run(DriveScene(tracks[0], settings))
     else:
-        run(DriveScene(tracks[0]))
+        run(MenuScene(settings))
 
 
 if __name__ == "__main__":

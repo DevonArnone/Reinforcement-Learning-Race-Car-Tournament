@@ -23,6 +23,7 @@ class Settings:
     sigma_min: float = 0.03
     sigma_decay: float = 0.97
     sensor_noise: float = 0.02
+    laps: int = 2  # the second, flying lap catches drivers that only survive from a standing start
     snapshot_every: int = 5
 
 
@@ -64,24 +65,28 @@ class Population:
 
 
 class Episode:
-    """One generation driving one lap of a track."""
+    """One generation driving a track for a fixed number of laps."""
 
     STALL_SECONDS = 2.0
     STALL_DISTANCE = 30.0
 
     def __init__(self, track: Track, genomes: np.ndarray, rng: np.random.Generator,
-                 start_along: float = 0.0, sensor_noise: float = 0.0):
+                 start_along: float = 0.0, sensor_noise: float = 0.0, laps: int = 1):
         self.track = track
+        self.laps = laps
         self.genomes = genomes
         self.rng = rng
         self.sensor_noise = sensor_noise
         self.fleet = Fleet(track, len(genomes))
         self.fleet.place_all_at(start_along)
         self.time = 0.0
-        self.time_limit = track.length / 120 + 5
+        self.time_limit = laps * track.length / 120 + 5
         n = len(genomes)
         self.crashed = np.zeros(n, dtype=bool)
         self.finish_time = np.full(n, np.nan)
+        self.best_lap = np.full(n, np.nan)
+        self.lap_started = np.zeros(n)
+        self.completed_laps = np.zeros(n)
         self.best_progress = np.zeros(n)
         self.last_improved = np.zeros(n)
         self.rays = np.zeros((n, sensors.RAY_COUNT))
@@ -112,12 +117,18 @@ class Episode:
         self.last_improved = np.where(improved, self.time, self.last_improved)
         stalled = self.time - self.last_improved > self.STALL_SECONDS
 
-        just_finished = fleet.active & (fleet.progress >= self.track.length)
+        completed = np.floor(fleet.progress / self.track.length)
+        new_lap = fleet.active & (completed > self.completed_laps)
+        self.best_lap = np.where(new_lap, np.fmin(self.best_lap, self.time - self.lap_started), self.best_lap)
+        self.lap_started = np.where(new_lap, self.time, self.lap_started)
+        self.completed_laps = np.maximum(completed, self.completed_laps)
+
+        just_finished = fleet.active & (fleet.progress >= self.laps * self.track.length)
         self.finish_time[just_finished] = self.time
         fleet.active &= ~(crashed | stalled | just_finished)
 
     def fitness(self) -> np.ndarray:
-        laps = np.clip(self.fleet.progress / self.track.length, -1, 1)
+        laps = np.clip(self.fleet.progress / self.track.length, -1, self.laps)
         speed_bonus = np.where(self.finished, 1 - self.finish_time / self.time_limit, 0)
         return laps + speed_bonus - 0.02 * self.crashed
 
@@ -125,15 +136,20 @@ class Episode:
 @dataclass
 class GenerationResult:
     generation: int
-    track: str
     best_fitness: float
     mean_fitness: float
-    finishers: int
-    best_lap: float | None
+    finishers: int                 # cars that completed a lap in every heat
+    laps: dict[str, float | None]  # fastest lap per track this generation
 
 
 @dataclass
 class Trainer:
+    """Each generation drives one heat per training track; fitness is the average.
+
+    Scoring on every track at once means a brain only wins by driving well
+    everywhere, instead of getting lucky on whichever track came up.
+    """
+
     tracks: list[Track]
     settings: Settings = field(default_factory=Settings)
     fresh: bool = False
@@ -151,36 +167,54 @@ class Trainer:
         self.population = Population(self.settings, self.rng, champion, generation)
         self.best_laps: dict[str, float] = {}
         self.history: list[GenerationResult] = []
+        self._start_generation()
+
+    def _start_generation(self):
+        self.heat = 0
+        self.heat_fitness = []
+        self.heat_finished = []
+        self.heat_laps = {}
         self.episode = self._new_episode()
 
     def _new_episode(self) -> Episode:
-        track = self.tracks[(self.population.generation - 1) % len(self.tracks)]
+        track = self.tracks[self.heat]
         # Varying the start point stops brains memorising one sequence of turns.
         start = 0.0 if len(self.history) < 3 else self.rng.uniform(0, track.length)
-        return Episode(track, self.population.genomes, self.rng, start, self.settings.sensor_noise)
+        return Episode(track, self.population.genomes, self.rng, start, self.settings.sensor_noise, self.settings.laps)
 
     def step(self) -> GenerationResult | None:
         """Advance one tick. Returns a result when a generation has just ended."""
         self.episode.step()
         if not self.episode.done:
             return None
+        self._end_heat()
+        if self.heat < len(self.tracks):
+            self.episode = self._new_episode()
+            return None
         return self._end_generation()
 
-    def _end_generation(self) -> GenerationResult:
+    def _end_heat(self):
         episode = self.episode
-        fitness = episode.fitness()
-        best = int(fitness.argmax())
-        track_name = episode.track.name
-        lap = float(np.nanmin(episode.finish_time)) if episode.finished.any() else None
-        if lap is not None and lap < self.best_laps.get(track_name, np.inf):
-            self.best_laps[track_name] = lap
+        name = episode.track.name
+        lap = float(np.nanmin(episode.best_lap)) if not np.isnan(episode.best_lap).all() else None
+        if lap is not None and lap < self.best_laps.get(name, np.inf):
+            self.best_laps[name] = lap
+        self.heat_laps[name] = lap
+        self.heat_fitness.append(episode.fitness())
+        self.heat_finished.append(episode.finished)
+        self.heat += 1
 
-        result = GenerationResult(self.population.generation, track_name, float(fitness[best]),
-                                  float(fitness.mean()), int(episode.finished.sum()), lap)
+    def _end_generation(self) -> GenerationResult:
+        fitness = np.mean(self.heat_fitness, axis=0)
+        best = int(fitness.argmax())
+        result = GenerationResult(
+            self.population.generation, float(fitness[best]), float(fitness.mean()),
+            int(np.all(self.heat_finished, axis=0).sum()), self.heat_laps,
+        )
         self.history.append(result)
-        self.save(episode.genomes[best], fitness[best])
+        self.save(self.population.genomes[best], fitness[best])
         self.population.evolve(fitness)
-        self.episode = self._new_episode()
+        self._start_generation()
         return result
 
     def save(self, genome: np.ndarray, fitness: float):
@@ -195,6 +229,6 @@ class Trainer:
             result = None
             while result is None:
                 result = self.step()
-            log(f"gen {result.generation:3d}  {result.track:<12} best {result.best_fitness:5.2f}  "
-                f"mean {result.mean_fitness:5.2f}  finished {result.finishers:2d}  "
-                f"lap {'--' if result.best_lap is None else f'{result.best_lap:.2f}s'}")
+            laps = "  ".join(f"{name} {'--' if lap is None else f'{lap:.2f}s'}" for name, lap in result.laps.items())
+            log(f"gen {result.generation:3d}  best {result.best_fitness:5.2f}  mean {result.mean_fitness:5.2f}  "
+                f"finished {result.finishers:2d}  |  {laps}")
