@@ -30,11 +30,20 @@ def font(size: int) -> pygame.font.Font:
     return _fonts[size]
 
 
+SCREEN_SIZE = np.array([config.SCREEN_W, config.SCREEN_H], dtype=float)
+
+
+def fit_zoom(track: Track) -> float:
+    """Zoom at which the whole track fits on screen (never above 1)."""
+    low, high = track.bounds(30)
+    return float(min(1.0, *(SCREEN_SIZE / (high - low))))
+
+
 def build_track_surface(track: Track) -> tuple[pygame.Surface, np.ndarray]:
     """Draw the track once at full scale. Returns the surface and its world origin."""
     low, high = track.bounds(TRACK_MARGIN)
-    # Pad small tracks out to the window size so the grass fills the screen.
-    padding = np.maximum(np.array([config.SCREEN_W, config.SCREEN_H]) - (high - low), 0) / 2
+    # Pad out so the grass still fills the window when zoomed out to fit.
+    padding = np.maximum(SCREEN_SIZE / fit_zoom(track) - (high - low), 0) / 2
     low, high = low - padding, high + padding
     size = np.ceil(high - low).astype(int)
     surface = pygame.Surface(size)
@@ -93,13 +102,15 @@ class Camera:
     """World-to-screen transform. Small tracks are framed whole; big ones are followed."""
 
     def __init__(self, track: Track, surface: pygame.Surface, origin: np.ndarray):
-        self.view = np.array([config.SCREEN_W, config.SCREEN_H], dtype=float)
+        self.view = SCREEN_SIZE
         self.origin = origin
         self.world_size = np.array(surface.get_size(), dtype=float)
-        self.fit_zoom = float(min(1.0, *(self.view / self.world_size)))
+        self.fit_zoom = fit_zoom(track)
         self.follow_zoom = 1.0
         self.overview = self.fit_zoom > 0.8
-        self.center = origin + self.world_size / 2
+        low, high = track.bounds(30)
+        self.track_center = (low + high) / 2
+        self.center = self.track_center
         self._base = surface
         self._scaled: dict[float, pygame.Surface] = {}
 
@@ -113,7 +124,7 @@ class Camera:
 
     def follow(self, target, smoothing: float = 0.12):
         if self.overview:
-            self.center = self.origin + self.world_size / 2
+            self.center = self.track_center
             return
         self.center = self.center + (np.asarray(target) - self.center) * smoothing
         half_view = self.view / (2 * self.zoom)
@@ -131,8 +142,10 @@ class Camera:
         screen.blit(self._scaled[zoom], self.to_screen(self.origin))
 
 
-def draw_cars(screen, camera: Camera, fleet: Fleet, sprites: list[pygame.Surface], faded=None):
-    for i in range(fleet.count):
+def draw_cars(screen, camera: Camera, fleet: Fleet, sprites: list[pygame.Surface], faded=None, on_top=None):
+    """Draw each car with sprites[i % len(sprites)]. `on_top` is drawn last so it stays visible."""
+    order = [i for i in range(fleet.count) if i != on_top] + ([on_top] if on_top is not None else [])
+    for i in order:
         sprite = pygame.transform.rotozoom(sprites[i % len(sprites)], -np.degrees(fleet.heading[i]), camera.zoom)
         if faded is not None and faded[i]:
             sprite.set_alpha(70)
@@ -157,3 +170,32 @@ def format_time(seconds: float | None) -> str:
         return "--"
     minutes, rest = divmod(seconds, 60)
     return f"{int(minutes)}:{rest:06.3f}" if minutes else f"{rest:.3f}s"
+
+
+def draw_hint(screen, text: str):
+    label = font(20).render(text, True, MUTED)
+    screen.blit(label, label.get_rect(midbottom=(config.SCREEN_W / 2, config.SCREEN_H - 10)))
+
+
+def draw_fitness_graph(screen, history, size=(260, 110)):
+    """Best and mean fitness over the most recent generations."""
+    if len(history) < 2:
+        return
+    recent = history[-60:]
+    w, h = size
+    x0, y0 = 16, config.SCREEN_H - h - 40
+    panel = pygame.Surface(size, pygame.SRCALPHA)
+    panel.fill(PANEL)
+    screen.blit(panel, (x0, y0))
+
+    best = np.array([r.best_fitness for r in recent])
+    mean = np.array([r.mean_fitness for r in recent])
+    low, high = min(mean.min(), 0), max(best.max(), 1)
+    xs = x0 + 10 + np.linspace(0, w - 20, len(recent))
+
+    def to_y(values):
+        return y0 + h - 22 - (values - low) / (high - low) * (h - 34)
+
+    pygame.draw.lines(screen, MUTED, False, list(zip(xs, to_y(mean))), 2)
+    pygame.draw.lines(screen, (250, 220, 80), False, list(zip(xs, to_y(best))), 2)
+    screen.blit(font(18).render("fitness  (best / mean)", True, MUTED), (x0 + 10, y0 + h - 18))
