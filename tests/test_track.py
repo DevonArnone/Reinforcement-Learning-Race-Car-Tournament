@@ -19,7 +19,8 @@ def test_locate_finds_points_on_the_centerline(track):
     indices = np.arange(0, track.count, 7)
     segment, along, gap = track.locate(track.center[indices], indices)
     assert np.allclose(gap, 0, atol=1e-6)
-    assert np.allclose(along, track.distance[indices], atol=1e-6)
+    difference = np.abs(along - track.distance[indices])
+    assert np.allclose(np.minimum(difference, track.length - difference), 0, atol=1e-6)
 
 
 def test_progress_increases_when_driving_the_centerline(track):
@@ -50,6 +51,13 @@ def test_start_grid_is_on_the_road_and_behind_the_line(track):
     _, along, gap = track.locate(positions, hints)
     assert np.all(gap < track.width / 2)
     assert np.all(along > track.length / 2)
+
+
+def test_corners_are_wider_than_the_road(track):
+    # A corner tighter than half the road width would fold the inside edge over itself.
+    turn = np.abs(np.diff(np.unwrap(track.heading)))
+    radius = track.segment_length[:-1] / np.maximum(turn, 1e-9)
+    assert radius.min() > track.width / 2 + 10
 
 
 def test_road_does_not_overlap_itself(track):
