@@ -2,7 +2,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 TRACKS_DIR = ROOT / "tracks"
-BRAINS_DIR = ROOT / "brains"
+BRAINS_DIR = ROOT / "brains"          # your own training runs (not committed)
+PRETRAINED_DIR = ROOT / "pretrained"  # drivers that ship with the repo
 SCREENSHOT_DIR = ROOT / "screenshots"
 
 # Window
